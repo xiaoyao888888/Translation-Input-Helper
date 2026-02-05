@@ -1,0 +1,7 @@
+{
+  "api_base": "https://api.minimaxi.com/v1",
+  "api_key": "sk-cp-B7xhlJgvORmiASkHimHI2TP4EQCObm6RQRBy86Ctga4Vj3tfEySO8euGGpQNgXwkq4lAH9arvbvdGfW5bp0naSU01DeUzp7t-Q9H9EaO6rXBptYDvsgIhmU",
+  "model": "MiniMax-M2.1",
+  "hotkey": "ctrl+alt+t",
+  "auto_hide_seconds": 5
+}
