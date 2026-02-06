@@ -1,7 +1,7 @@
 """
 翻译输入助手 - 简洁长条设计
-- 只有输入框
-- 翻译后直接粘贴
+- 输入框 + 双语对照框
+- 自动粘贴开关
 """
 
 import sys
@@ -13,10 +13,11 @@ import pyperclip
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QShortcut, QGraphicsDropShadowEffect,
-    QSystemTrayIcon, QMenu, QAction
+    QSystemTrayIcon, QMenu, QAction, QFrame
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPoint
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QPoint, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QFont, QColor, QCursor, QIcon, QPixmap, QPainter, QLinearGradient
+from PyQt5.QtWidgets import QGraphicsOpacityEffect
 
 from translator import Translator
 from pynput.keyboard import Key, Controller as KeyboardController
@@ -27,14 +28,17 @@ user32 = ctypes.windll.user32
 class FloatingTranslator(QWidget):
     """简洁长条翻译窗口"""
     
-    translation_done = pyqtSignal(str)
+    translation_done = pyqtSignal(str, str)  # (original, translated)
     
     def __init__(self):
         super().__init__()
         
         self._pinned = True
+        self._auto_paste = True  # 自动粘贴开关
         self._dragging = False
         self._drag_position = QPoint()
+        self._last_original = ""
+        self._last_translated = ""
         
         self.translator = Translator('config.json')
         self.keyboard = KeyboardController()
@@ -42,7 +46,7 @@ class FloatingTranslator(QWidget):
         self._init_ui()
         self._setup_shortcuts()
         self.translation_done.connect(self._show_result)
-        
+
     def _init_ui(self):
         """初始化简洁 UI"""
         self.setWindowFlags(
@@ -51,20 +55,19 @@ class FloatingTranslator(QWidget):
             Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        # Size will be set dynamically in main()
         
         # 主容器
         self.container = QWidget(self)
         self.container.setObjectName("container")
         
-        # 阴影 - 清透水滴阴影
+        # 阴影
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(25)
         shadow.setColor(QColor(100, 200, 255, 50))
         shadow.setOffset(0, 5)
         self.container.setGraphicsEffect(shadow)
         
-        # 清透水滴样式 - 高透明度
+        # 样式
         self.setStyleSheet("""
             #container {
                 background: qlineargradient(
@@ -90,14 +93,26 @@ class FloatingTranslator(QWidget):
                 font-size: 15px;
                 color: rgba(44, 82, 130, 0.8);
             }
+            QLabel#comparisonLabel {
+                font-size: 20px;
+                color: #2c5282;
+                padding: 10px 14px;
+                background-color: rgba(255, 255, 255, 0.4);
+                border-radius: 12px;
+            }
+            QLabel#originalTitle, QLabel#translatedTitle {
+                font-size: 15px;
+                font-weight: bold;
+                color: #4a5568;
+            }
             QLineEdit {
                 background-color: rgba(255, 255, 255, 0.5);
                 border: 2px solid rgba(100, 180, 220, 0.4);
-                border-radius: 18px;
-                padding: 14px 20px;
+                border-radius: 16px;
+                padding: 10px 18px;
                 color: #1a365d;
                 font-family: "Microsoft YaHei", "Segoe UI";
-                font-size: 22px;
+                font-size: 18px;
                 selection-background-color: rgba(100, 180, 220, 0.4);
             }
             QLineEdit:focus {
@@ -109,15 +124,16 @@ class FloatingTranslator(QWidget):
             }
             QPushButton {
                 border: none;
-                border-radius: 16px;
-                padding: 14px 28px;
+                border-radius: 14px;
+                padding: 10px 18px;
                 font-family: "Microsoft YaHei", "Segoe UI";
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: bold;
             }
             QPushButton#actionBtn {
                 background-color: rgba(66, 153, 225, 0.9);
                 color: #ffffff;
+                padding: 10px 20px;
             }
             QPushButton#actionBtn:hover {
                 background-color: rgba(49, 130, 206, 1);
@@ -125,11 +141,26 @@ class FloatingTranslator(QWidget):
             QPushButton#actionBtn:disabled {
                 background-color: rgba(66, 153, 225, 0.4);
             }
+            QPushButton#autoPasteBtn {
+                background-color: rgba(72, 187, 120, 0.8);
+                color: #ffffff;
+                padding: 10px 12px;
+            }
+            QPushButton#autoPasteBtn:hover {
+                background-color: rgba(56, 161, 105, 1);
+            }
+            QPushButton#autoPasteBtnOff {
+                background-color: rgba(160, 174, 192, 0.5);
+                color: #4a5568;
+                padding: 10px 12px;
+            }
+            QPushButton#autoPasteBtnOff:hover {
+                background-color: rgba(160, 174, 192, 0.7);
+            }
             QPushButton#pinBtn {
                 background-color: rgba(66, 153, 225, 0.3);
                 color: #2b6cb0;
-                padding: 10px 14px;
-                font-size: 13px;
+                padding: 8px 12px;
             }
             QPushButton#pinBtn:hover {
                 background-color: rgba(66, 153, 225, 0.5);
@@ -145,6 +176,11 @@ class FloatingTranslator(QWidget):
                 background-color: rgba(254, 178, 178, 0.5);
                 border-radius: 14px;
             }
+            #comparisonBox {
+                background-color: rgba(255, 255, 255, 0.5);
+                border-radius: 14px;
+                border: 1px solid rgba(100, 180, 220, 0.3);
+            }
         """)
         
         # 主布局
@@ -152,35 +188,47 @@ class FloatingTranslator(QWidget):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.addWidget(self.container)
         
-        # 容器布局 - 水平一行
-        layout = QHBoxLayout(self.container)
-        layout.setContentsMargins(28, 20, 28, 20)
-        layout.setSpacing(16)
+        # 容器布局
+        self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setContentsMargins(24, 16, 24, 16)
+        self.container_layout.setSpacing(10)
+        
+        # 顶部行 - 输入区域
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
         
         # 标题
         title = QLabel("🌈")
         title.setObjectName("titleLabel")
-        layout.addWidget(title)
+        top_row.addWidget(title)
         
         # 输入框
         self.input_box = QLineEdit()
-        self.input_box.setPlaceholderText("输入中文，按 Enter 翻译并粘贴...")
+        self.input_box.setPlaceholderText("输入中文，按 Enter 翻译...")
         self.input_box.textChanged.connect(self._on_text_changed)
         self.input_box.returnPressed.connect(self._on_translate_and_paste)
-        layout.addWidget(self.input_box, 1)
+        top_row.addWidget(self.input_box, 1)
         
         # 状态
         self.status_label = QLabel("")
         self.status_label.setObjectName("statusLabel")
-        self.status_label.setFixedWidth(80)
-        layout.addWidget(self.status_label)
+        self.status_label.setFixedWidth(70)
+        top_row.addWidget(self.status_label)
         
         # 操作按钮
         self.action_btn = QPushButton("翻译 ↵")
         self.action_btn.setObjectName("actionBtn")
         self.action_btn.setCursor(Qt.PointingHandCursor)
         self.action_btn.clicked.connect(self._on_translate_and_paste)
-        layout.addWidget(self.action_btn)
+        top_row.addWidget(self.action_btn)
+        
+        # 自动粘贴开关按钮
+        self.auto_paste_btn = QPushButton("📋 自动粘贴")
+        self.auto_paste_btn.setObjectName("autoPasteBtn")
+        self.auto_paste_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_paste_btn.clicked.connect(self._toggle_auto_paste)
+        self.auto_paste_btn.setToolTip("开启/关闭自动粘贴")
+        top_row.addWidget(self.auto_paste_btn)
         
         # 置顶按钮
         self.pin_btn = QPushButton("📌")
@@ -188,14 +236,59 @@ class FloatingTranslator(QWidget):
         self.pin_btn.setCursor(Qt.PointingHandCursor)
         self.pin_btn.clicked.connect(self._toggle_pin)
         self.pin_btn.setToolTip("切换置顶")
-        layout.addWidget(self.pin_btn)
+        top_row.addWidget(self.pin_btn)
         
         # 关闭
         close_btn = QPushButton("×")
         close_btn.setObjectName("closeBtn")
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn)
+        top_row.addWidget(close_btn)
+        
+        self.container_layout.addLayout(top_row)
+        
+        # 双语对照框
+        self.comparison_box = QFrame()
+        self.comparison_box.setObjectName("comparisonBox")
+        self.comparison_box.setMaximumHeight(150)  # 限制最大高度
+        comparison_layout = QHBoxLayout(self.comparison_box)
+        comparison_layout.setContentsMargins(16, 12, 16, 12)
+        comparison_layout.setSpacing(16)
+        
+        # 原文区域
+        original_container = QVBoxLayout()
+        original_container.setSpacing(4)
+        original_title = QLabel("🇨🇳 原文")
+        original_title.setObjectName("originalTitle")
+        self.original_text = QLabel("")
+        self.original_text.setObjectName("comparisonLabel")
+        self.original_text.setWordWrap(True)
+        original_container.addWidget(original_title)
+        original_container.addWidget(self.original_text)
+        comparison_layout.addLayout(original_container, 1)
+        
+        # 分隔符
+        separator = QLabel("→")
+        separator.setStyleSheet("font-size: 20px; color: #a0aec0;")
+        separator.setAlignment(Qt.AlignCenter)
+        comparison_layout.addWidget(separator)
+        
+        # 译文区域
+        translated_container = QVBoxLayout()
+        translated_container.setSpacing(4)
+        translated_title = QLabel("🇬🇧 译文")
+        translated_title.setObjectName("translatedTitle")
+        self.translated_text = QLabel("")
+        self.translated_text.setObjectName("comparisonLabel")
+        self.translated_text.setWordWrap(True)
+        translated_container.addWidget(translated_title)
+        translated_container.addWidget(self.translated_text)
+        comparison_layout.addLayout(translated_container, 1)
+        
+        self.container_layout.addWidget(self.comparison_box)
+        
+        # 初始隐藏对照框
+        self.comparison_box.hide()
         
     def _setup_shortcuts(self):
         paste = QShortcut(Qt.CTRL + Qt.Key_Return, self)
@@ -214,6 +307,17 @@ class FloatingTranslator(QWidget):
             self.pin_btn.setText("📍")
         self.show()
         
+    def _toggle_auto_paste(self):
+        """切换自动粘贴开关"""
+        self._auto_paste = not self._auto_paste
+        if self._auto_paste:
+            self.auto_paste_btn.setText("📋 自动粘贴")
+            self.auto_paste_btn.setObjectName("autoPasteBtn")
+        else:
+            self.auto_paste_btn.setText("📋 手动复制")
+            self.auto_paste_btn.setObjectName("autoPasteBtnOff")
+        self.auto_paste_btn.setStyle(self.auto_paste_btn.style())
+        
     def _on_text_changed(self):
         pass
         
@@ -223,6 +327,7 @@ class FloatingTranslator(QWidget):
             self.status_label.setText("请输入")
             return
         
+        self._last_original = text
         self.status_label.setText("翻译中...")
         self.action_btn.setEnabled(False)
         threading.Thread(target=self._do_translate, args=(text,), daemon=True).start()
@@ -230,19 +335,60 @@ class FloatingTranslator(QWidget):
     def _do_translate(self, text):
         try:
             result = self.translator.translate(text)
-            self.translation_done.emit(result)
+            self.translation_done.emit(text, result)
         except Exception as e:
-            self.translation_done.emit(f"错误: {e}")
+            self.translation_done.emit(text, f"错误: {e}")
             
-    def _show_result(self, result):
+    def _show_result(self, original, result):
         self.action_btn.setEnabled(True)
-        self.status_label.setText("粘贴中...")
-        pyperclip.copy(result)
+        self._last_original = original
+        self._last_translated = result
+        
+        # 更新对照框
+        self.original_text.setText(original)
+        self.translated_text.setText(result)
+        self.comparison_box.show()
+        
+        # 动态调整窗口高度
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        self.adjustSize()
+        
+        if self._auto_paste:
+            # 复制到剪贴板并粘贴
+            pyperclip.copy(result)
+            self.status_label.setText("粘贴中...")
+            self._fade_out_and_paste()
+        else:
+            # 手动模式：只显示结果，不复制
+            self.status_label.setText("")
+            self.input_box.clear()
+            self.input_box.setFocus()
+    
+    def _fade_out_and_paste(self):
+        """淡出动画后执行粘贴"""
+        # 创建透明度效果
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        
+        # 淡出动画
+        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._fade_anim.setDuration(150)
+        self._fade_anim.setStartValue(1.0)
+        self._fade_anim.setEndValue(0.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutQuad)
+        self._fade_anim.finished.connect(self._on_fade_out_done)
+        self._fade_anim.start()
+    
+    def _on_fade_out_done(self):
+        """淡出完成后隐藏并粘贴"""
         self.hide()
+        self.setGraphicsEffect(None)  # 移除效果
         QApplication.processEvents()
-        QTimer.singleShot(200, self._do_paste)
+        QTimer.singleShot(100, self._do_paste)
         
     def _do_paste(self):
+        """执行粘贴"""
         time.sleep(0.1)
         self.keyboard.press(Key.ctrl)
         time.sleep(0.05)
@@ -251,10 +397,28 @@ class FloatingTranslator(QWidget):
         self.keyboard.release('v')
         self.keyboard.release(Key.ctrl)
         print("[粘贴] 完成")
-        QTimer.singleShot(300, self._reshow)
+        QTimer.singleShot(200, self._fade_in_show)
         
-    def _reshow(self):
+    def _fade_in_show(self):
+        """淡入显示窗口"""
+        # 先设置透明
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity_effect)
         self.show()
+        
+        # 淡入动画
+        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._fade_anim.setDuration(200)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.InQuad)
+        self._fade_anim.finished.connect(self._on_fade_in_done)
+        self._fade_anim.start()
+    
+    def _on_fade_in_done(self):
+        """淡入完成后清理"""
+        self.setGraphicsEffect(None)
         self.input_box.clear()
         self.status_label.setText("")
         self.input_box.setFocus()
@@ -338,7 +502,7 @@ def main():
     # 动态计算窗口大小 - 屏幕宽度的 1/3
     screen = app.primaryScreen().geometry()
     window_width = int(screen.width() / 3)
-    window_height = 120
+    window_height = 100
     window.setFixedSize(window_width, window_height)
     
     # 屏幕顶部居中
@@ -350,7 +514,7 @@ def main():
     tray.show()
     window.input_box.setFocus()
     
-    print("✅ 翻译助手 - 输入中文，按 Enter 翻译并粘贴")
+    print("✅ 翻译助手 - 输入中文，按 Enter 翻译")
     
     sys.exit(app.exec_())
 
